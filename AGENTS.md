@@ -26,13 +26,15 @@ src/lib/store.ts            State engine: localStorage + Firestore sync + auth. 
 src/hooks/useAuth.ts        useAuth() -> { user, canEdit, signIn, signOut, syncEnabled }
 src/hooks/usePersistentState.ts  usePersistentSet / usePersistentMap (synced checklists, prices)
 src/components/AuthButton.tsx    Header login/logout UI (dialog)
-src/sections/               Overview.tsx, Phases.tsx, Parts.tsx, Budget.tsx
-src/pages/Home.tsx          Shell: header, desktop tabs, mobile bottom nav
+src/sections/               Overview.tsx, Phases.tsx, Parts.tsx, Budget.tsx, Docs.tsx
+src/pages/Home.tsx          Shell: header, desktop tabs, mobile bottom nav (5 tabs incl. Docs)
 public/manifest.webmanifest PWA manifest (start_url/scope are "./" on purpose)
 public/sw.js                Service worker: offline shell; Firebase traffic NEVER cached
 public/icons/               Generated PWA icons (regenerate with ../../make_icons.py)
 firestore.rules             THE security model — deployed to Firebase, see §3
-firebase.json / .firebaserc firebase deploy config (project: c30-swap-tracker)
+firebase.json / .firebaserc firebase deploy config (project: c30-swap-tracker).
+                            Also has a hosting block (dist + SPA rewrite) — Firebase Hosting
+                            is a ready alternative deploy target if Pages is ever dropped.
 .github/workflows/deploy.yml  GitHub Pages deploy (npm ci -> build -> deploy-pages)
 start-tracker.cmd           Windows launcher for local dev server (see §6)
 allow-port-8080-ADMIN.cmd   One-time firewall rule (Run as administrator)
