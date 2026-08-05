@@ -173,6 +173,22 @@ curl -X PATCH "$DOC" -d '{...}'              # 403 (public write blocked)
     the link `tailscale funnel` prints), and root/operator on the node
     (`sudo tailscale set --operator=casita`). Portainer owns host :8000 — vida-auth
     binds 127.0.0.1:8100 instead.
+13. **SW cache-first made index.json immortal → "everything under Other" (2026-08-05).**
+    sw.js v3 cached index.json cache-first forever, so after the group-data content
+    update the app kept rendering the old index (no `g` fields → every doc grouped
+    as "Other"). sw.js v4 serves `/vida/index.json` NETWORK-first (cache is only the
+    offline fallback) and Vida.tsx force-reloads once if it ever sees an index
+    without `groups`. Any future mutation of served content must keep this pattern:
+    immutable files cache-first, mutable catalogs network-first + a cache-name bump.
+14. **Obelisk Chrome can wedge per-host against the funnel while curl works.**
+    Symptom (seen 2026-08-05): every fetch to casita-ha.tail162aff.ts.net from the
+    main Chrome profile hung forever (page- AND service-worker-initiated), while
+    curl, other sites, and the phone were all fine; the requests never reached the
+    server. Host-specific Chrome network state (dead H2 session / AV web filter /
+    DoH quirk) — a full browser restart is the cure, it is NOT an app or server
+    bug. Diagnostic pattern: `curl` OK + server log shows no request + Chrome
+    hangs on one host only → browser-local wedge; check `caches.keys()` and
+    `navigator.serviceWorker.controller` in the page to rule the SW in or out.
 
 ## 10. VIDA workshop library (home-server content service)
 
