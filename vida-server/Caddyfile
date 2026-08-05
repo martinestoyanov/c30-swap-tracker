@@ -1,0 +1,7 @@
+casitaor.duckdns.org:8443 {
+	tls {
+		dns duckdns {$DUCKDNS_TOKEN}
+	}
+	encode zstd gzip
+	reverse_proxy vida-auth:8000
+}
