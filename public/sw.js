@@ -6,7 +6,9 @@
 //    The page posts the current Firebase ID token via SET_VIDA_AUTH; every
 //    request to the vida origin gets an Authorization header injected here,
 //    and successful responses are cached cache-first for offline garage use.
-const CACHE = "c30-tracker-v3";
+//    EXCEPTION: index.json is mutable (content updates) -> network-first,
+//    falling back to cache only when the server is unreachable.
+const CACHE = "c30-tracker-v4";
 
 let vidaOrigin = null;
 let vidaToken = null;
@@ -29,11 +31,27 @@ self.addEventListener("activate", (e) =>
 );
 
 function vidaFetch(request) {
-  return caches.match(request).then((hit) => {
-    if (hit) return hit;
+  const authed = () => {
     const headers = new Headers(request.headers);
     if (vidaToken) headers.set("Authorization", "Bearer " + vidaToken);
-    return fetch(request.url, { method: "GET", headers, credentials: "omit" }).then((res) => {
+    return fetch(request.url, { method: "GET", headers, credentials: "omit" });
+  };
+  // Mutable catalog: network-first so content updates show up immediately.
+  if (request.url.endsWith("/vida/index.json")) {
+    return authed().then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(request, copy));
+      }
+      return res;
+    }).catch(() =>
+      caches.match(request).then((hit) => hit || Promise.reject(new TypeError("offline")))
+    );
+  }
+  // Immutable content (docs, images, diagrams, parts lists): cache-first.
+  return caches.match(request).then((hit) => {
+    if (hit) return hit;
+    return authed().then((res) => {
       if (res.ok) {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(request, copy));

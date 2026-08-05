@@ -150,7 +150,22 @@ export default function Vida() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<VidaIndex>;
       })
-      .then((idx) => live && setIndex(idx))
+      .then((idx) => {
+        if (!live) return;
+        if (!idx.groups) {
+          // A pre-grouping index can only come from an outdated service
+          // worker's cache. Reload once so the updated SW (network-first
+          // index) takes control and fetches the current catalog.
+          if (!sessionStorage.getItem("vidaStaleReload")) {
+            sessionStorage.setItem("vidaStaleReload", "1");
+            location.reload();
+            return;
+          }
+          throw new Error("stale index (missing group data)");
+        }
+        sessionStorage.removeItem("vidaStaleReload");
+        setIndex(idx);
+      })
       .catch((e) => live && setIndexFail(errText(e)));
     return () => {
       live = false;
@@ -236,20 +251,37 @@ export default function Vida() {
     });
   }, [docs, section]);
 
-  // Browse mode: docs of the selected group, bucketed by 2-digit subgroup.
+  // Browse mode: docs of the selected group, bucketed hierarchically:
+  // subgroup (2-digit) -> { direct docs, sub-subgroup (3-digit) -> docs }.
+  interface SubBucket {
+    direct: VidaDoc[];
+    subs: Map<string, VidaDoc[]>;
+  }
   const subGroups = useMemo(() => {
-    const out = new Map<string, VidaDoc[]>();
+    const out = new Map<string, SubBucket>();
     if (groupSel === null) return out;
     for (const d of docs) {
       if (d.s !== section || (d.g?.[0] ?? "?") !== groupSel) continue;
-      const sub = d.g?.[1] ?? "";
-      if (!out.has(sub)) out.set(sub, []);
-      out.get(sub)!.push(d);
+      const s1 = d.g?.[1] ?? "";
+      if (!out.has(s1)) out.set(s1, { direct: [], subs: new Map() });
+      const bucket = out.get(s1)!;
+      const s2 = d.g?.[2];
+      if (s2) {
+        if (!bucket.subs.has(s2)) bucket.subs.set(s2, []);
+        bucket.subs.get(s2)!.push(d);
+      } else {
+        bucket.direct.push(d);
+      }
     }
+    const byCode = ([a]: [string, unknown], [b]: [string, unknown]) =>
+      a === "" ? -1 : b === "" ? 1 : a.localeCompare(b);
     return new Map(
-      [...out.entries()].sort(([a], [b]) =>
-        a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)
-      )
+      [...out.entries()]
+        .sort(byCode)
+        .map(([k, v]): [string, SubBucket] => [
+          k,
+          { direct: v.direct, subs: new Map([...v.subs.entries()].sort(byCode)) },
+        ])
     );
   }, [docs, section, groupSel]);
 
@@ -677,9 +709,12 @@ export default function Vida() {
               </span>
               {groupTitle(groupSel)}
             </p>
-            {[...subGroups.entries()].map(([sub, list]) => {
+            {[...subGroups.entries()].map(([sub, bucket]) => {
               const key = `${section}::${groupSel}::${sub}`;
               const open = openGroups.has(key);
+              const count =
+                bucket.direct.length +
+                [...bucket.subs.values()].reduce((n, l) => n + l.length, 0);
               return (
                 <div key={key} className="rounded-lg border overflow-hidden">
                   <button
@@ -701,20 +736,65 @@ export default function Vida() {
                       {sub ? groupTitle(sub) : "General"}
                     </span>
                     <span className="ml-auto text-[11px] text-muted-foreground shrink-0">
-                      {list.length}
+                      {count}
                     </span>
                   </button>
                   {open && (
-                    <div className="border-t divide-y">
-                      {list.map((d) => (
-                        <DocRow
-                          key={d.u}
-                          d={d}
-                          loading={loadingDoc === d.u}
-                          disabled={loadingDoc !== null}
-                          onOpen={() => void openDoc(d)}
-                        />
-                      ))}
+                    <div className="border-t">
+                      {bucket.direct.length > 0 && (
+                        <div className="divide-y">
+                          {bucket.direct.map((d) => (
+                            <DocRow
+                              key={d.u}
+                              d={d}
+                              loading={loadingDoc === d.u}
+                              disabled={loadingDoc !== null}
+                              onOpen={() => void openDoc(d)}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {[...bucket.subs.entries()].map(([sub2, list]) => {
+                        const key2 = `${key}::${sub2}`;
+                        const open2 = openGroups.has(key2);
+                        return (
+                          <div key={key2} className="border-t">
+                            <button
+                              onClick={() => toggle(key2)}
+                              className="w-full flex items-center gap-2 pl-7 pr-3 py-2 text-left hover:bg-muted/50"
+                            >
+                              <ChevronRight
+                                className={cn(
+                                  "h-3.5 w-3.5 text-muted-foreground transition-transform",
+                                  open2 && "rotate-90"
+                                )}
+                              />
+                              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                                {sub2}
+                              </span>
+                              <span className="text-sm truncate capitalize">
+                                {groupTitle(sub2)}
+                              </span>
+                              <span className="ml-auto text-[11px] text-muted-foreground shrink-0">
+                                {list.length}
+                              </span>
+                            </button>
+                            {open2 && (
+                              <div className="border-t divide-y bg-muted/20">
+                                {list.map((d) => (
+                                  <DocRow
+                                    key={d.u}
+                                    d={d}
+                                    loading={loadingDoc === d.u}
+                                    disabled={loadingDoc !== null}
+                                    onOpen={() => void openDoc(d)}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
