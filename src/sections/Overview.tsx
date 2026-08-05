@@ -1,5 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import VidaHealth from "@/components/VidaHealth";
 import { MILESTONES, REV2_DECISIONS } from "@/data/plan";
 import { CheckCircle2, CircleDot, Circle, ArrowRightCircle } from "lucide-react";
 
@@ -28,6 +29,7 @@ export default function Overview() {
             <Badge variant="secondary">C30 FWD driver's axle transfers</Badge>
             <Badge variant="secondary">Both OEM trans mounts on hand</Badge>
           </div>
+          <VidaHealth />
         </CardContent>
       </Card>
 

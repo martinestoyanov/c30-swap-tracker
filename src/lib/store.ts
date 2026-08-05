@@ -129,6 +129,10 @@ export interface VidaConfig {
   diagrams: number;
 }
 
+// Last-resort origin for unauthenticated health pings (hostname is public in
+// the repo's Caddyfile anyway); signed-in flows always prefer Firestore config.
+export const VIDA_FALLBACK_ORIGIN = "https://casitaor.duckdns.org:8443";
+
 /**
  * One-shot read of the VIDA config doc. Firestore rules restrict this
  * document to the two project accounts, so call it only when signed in.

@@ -7,6 +7,7 @@ import {
   pokeVidaAuth,
   type VidaConfig,
 } from "@/lib/store";
+import { pingVidaHealth, type VidaPing } from "@/components/VidaHealth";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -16,6 +17,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Lock,
+  RefreshCw,
   Search,
 } from "lucide-react";
 
@@ -75,12 +77,21 @@ async function authedFetch(url: string, retry = true): Promise<Response> {
   return res;
 }
 
+const errText = (e: unknown) =>
+  e instanceof TypeError
+    ? `${e.message} — network, DNS, or CORS block`
+    : e instanceof Error
+      ? e.message
+      : String(e);
+
 export default function Vida() {
   const { user, ready, syncEnabled } = useAuth();
   const [config, setConfig] = useState<VidaConfig | null>(null);
   const [configTried, setConfigTried] = useState(false);
   const [index, setIndex] = useState<VidaIndex | null>(null);
-  const [indexError, setIndexError] = useState(false);
+  const [indexFail, setIndexFail] = useState<string | null>(null);
+  const [health, setHealth] = useState<VidaPing | null>(null);
+  const [probeNonce, setProbeNonce] = useState(0);
 
   const [mode, setMode] = useState<"docs" | "diagrams">("docs");
   const [model, setModel] = useState<ModelFilter>("all");
@@ -96,6 +107,8 @@ export default function Vida() {
       setIndex(null);
       setConfigTried(false);
       setSelected(null);
+      setHealth(null);
+      setIndexFail(null);
       return;
     }
     let live = true;
@@ -110,20 +123,38 @@ export default function Vida() {
     };
   }, [user]);
 
+  // Health probe of the content server (no auth needed for /healthz).
+  useEffect(() => {
+    if (!config?.origin) return;
+    let live = true;
+    setHealth(null);
+    void pingVidaHealth(config.origin).then((p) => live && setHealth(p));
+    return () => {
+      live = false;
+    };
+  }, [config, probeNonce]);
+
+  // Library index download (authed).
   useEffect(() => {
     if (!config?.origin || index) return;
     let live = true;
     authedFetch(`${config.origin}/vida/index.json`)
       .then((r) => {
-        if (!r.ok) throw new Error(String(r.status));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<VidaIndex>;
       })
       .then((idx) => live && setIndex(idx))
-      .catch(() => live && setIndexError(true));
+      .catch((e) => live && setIndexFail(errText(e)));
     return () => {
       live = false;
     };
-  }, [config, index]);
+  }, [config, index, probeNonce]);
+
+  const recheck = () => {
+    setIndexFail(null);
+    setHealth(null);
+    setProbeNonce((n) => n + 1);
+  };
 
   const modelId = model === "all" ? null : Number(model);
   const q = query.trim().toLowerCase();
@@ -260,14 +291,64 @@ export default function Vida() {
     );
   }
 
-  if (indexError) {
+  const somethingWrong = indexFail !== null || (health !== null && !health.ok);
+
+  if (somethingWrong) {
     return (
-      <Card>
-        <p className="text-sm text-red-600">
-          Could not reach the VIDA content server. It may be offline — cached
-          documents still open from this device.
-        </p>
-      </Card>
+      <div className="space-y-3">
+        <div className="rounded-lg border p-4 space-y-2.5">
+          <div className="flex items-center gap-2">
+            <BookMarked className="h-4 w-4 text-orange-500" />
+            <p className="text-sm font-medium">VIDA connection diagnostics</p>
+            <button
+              onClick={recheck}
+              className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Re-check
+            </button>
+          </div>
+          <DiagRow
+            label="Content server (healthz)"
+            state={health === null ? "checking" : health.ok ? "ok" : "fail"}
+            detail={
+              health === null
+                ? config!.origin
+                : health.ok
+                  ? `${config!.origin} · ${health.ms} ms`
+                  : `${config!.origin} · ${health.err ?? "unreachable"}`
+            }
+          />
+          <DiagRow
+            label="Library index (signed-in fetch)"
+            state={
+              index ? "ok" : indexFail === null ? "checking" : "fail"
+            }
+            detail={
+              index
+                ? `${index.docs.length.toLocaleString()} docs, ${index.diagrams.length.toLocaleString()} diagrams`
+                : indexFail === null
+                  ? "downloading…"
+                  : indexFail
+            }
+          />
+          {health !== null && !health.ok && (
+            <p className="text-xs text-muted-foreground pt-1">
+              The server itself is unreachable from this device. Try opening{" "}
+              <span className="font-mono">{config!.origin}/healthz</span>{" "}
+              directly in this browser — if that also fails, the problem is
+              network-level (cell carrier port filtering, DNS, or the home
+              connection), not the app.
+            </p>
+          )}
+          {health?.ok && indexFail && (
+            <p className="text-xs text-muted-foreground pt-1">
+              The server answers but the signed-in fetch failed — this points
+              at the auth handshake on this browser. Signing out and back in
+              usually clears it.
+            </p>
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -328,6 +409,13 @@ export default function Vida() {
             {index.diagrams.length.toLocaleString()} diagrams
           </span>
         </div>
+
+        {health?.ok && (
+          <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Content server online · {health.ms} ms
+          </p>
+        )}
 
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -500,6 +588,35 @@ export default function Vida() {
           );
         })
       )}
+    </div>
+  );
+}
+
+function DiagRow({
+  label,
+  state,
+  detail,
+}: {
+  label: string;
+  state: "ok" | "fail" | "checking";
+  detail: string;
+}) {
+  return (
+    <div className="flex items-start gap-2 text-sm">
+      <span
+        className={cn(
+          "mt-1.5 h-2 w-2 rounded-full shrink-0",
+          state === "ok"
+            ? "bg-emerald-500"
+            : state === "fail"
+              ? "bg-red-500"
+              : "bg-muted-foreground animate-pulse"
+        )}
+      />
+      <div className="min-w-0">
+        <p className="font-medium leading-tight">{label}</p>
+        <p className="text-xs text-muted-foreground break-all">{detail}</p>
+      </div>
     </div>
   );
 }
