@@ -27,6 +27,7 @@ interface VidaDoc {
   s: string;
   m: number[];
   u: string; // relative path under /vida/
+  g?: string[]; // VIDA function group path, e.g. ["2","21"] or ["?"]
 }
 interface VidaDiagram {
   dia: string;
@@ -38,9 +39,13 @@ interface VidaDiagram {
 interface VidaIndex {
   generated: string;
   models: Record<string, string>;
+  groups?: Record<string, string>; // group code -> title ("2" -> "Engine with mountings…")
   docs: VidaDoc[];
   diagrams: VidaDiagram[];
 }
+
+// [pos, part number, name, qty]
+type PartRow = [string, string, string, number];
 
 const SECTION_ORDER = ["repair", "specs", "service", "accessories", "bulletins", "general"];
 const SECTION_LABELS: Record<string, string> = {
@@ -64,7 +69,7 @@ const pretty = (s: string) =>
 
 type Selection =
   | { kind: "doc"; title: string; html: string }
-  | { kind: "diagram"; title: string; url: string };
+  | { kind: "diagram"; title: string; url: string; dia: string };
 
 /** Fetch with an explicit Firebase token (independent of SW state). */
 async function authedFetch(url: string, retry = true): Promise<Response> {
@@ -96,6 +101,8 @@ export default function Vida() {
   const [mode, setMode] = useState<"docs" | "diagrams">("docs");
   const [model, setModel] = useState<ModelFilter>("all");
   const [query, setQuery] = useState("");
+  const [section, setSection] = useState("repair");
+  const [groupSel, setGroupSel] = useState<string | null>(null); // top-level group code
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Selection | null>(null);
   const [loadingDoc, setLoadingDoc] = useState<string | null>(null);
@@ -150,6 +157,13 @@ export default function Vida() {
     };
   }, [config, index, probeNonce]);
 
+  // Android/browser back button closes the viewer instead of leaving the app.
+  useEffect(() => {
+    const onPop = () => setSelected(null);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   const recheck = () => {
     setIndexFail(null);
     setHealth(null);
@@ -158,27 +172,29 @@ export default function Vida() {
 
   const modelId = model === "all" ? null : Number(model);
   const q = query.trim().toLowerCase();
+  const searching = q.length >= 2;
 
   const docs = useMemo(() => {
     if (!index) return [];
     return index.docs.filter(
       (d) =>
         (modelId === null || d.m.includes(modelId)) &&
-        (q.length < 2 || d.t.toLowerCase().includes(q))
+        (!searching || d.t.toLowerCase().includes(q))
     );
-  }, [index, modelId, q]);
+  }, [index, modelId, q, searching]);
 
   const diagrams = useMemo(() => {
     if (!index) return [];
     return index.diagrams.filter(
       (d) =>
         (modelId === null || d.m.includes(modelId)) &&
-        (q.length < 2 ||
+        (!searching ||
           d.name.toLowerCase().includes(q) ||
           d.dia.toLowerCase().includes(q))
     );
-  }, [index, modelId, q]);
+  }, [index, modelId, q, searching]);
 
+  // Search mode: flat section::category grouping across all sections.
   const docsByGroup = useMemo(() => {
     const out = new Map<string, VidaDoc[]>();
     for (const d of docs) {
@@ -193,6 +209,52 @@ export default function Vida() {
       return a.localeCompare(b);
     });
   }, [docs]);
+
+  // Browse mode: sections present in the model-filtered corpus.
+  const sectionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const d of docs) counts.set(d.s, (counts.get(d.s) ?? 0) + 1);
+    return SECTION_ORDER.filter((s) => counts.has(s)).map((s) => ({
+      id: s,
+      label: SECTION_LABELS[s] ?? s,
+      count: counts.get(s)!,
+    }));
+  }, [docs]);
+
+  // Browse mode: top-level groups within the active section.
+  const groupCards = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const d of docs) {
+      if (d.s !== section) continue;
+      const g0 = d.g?.[0] ?? "?";
+      out.set(g0, (out.get(g0) ?? 0) + 1);
+    }
+    return [...out.entries()].sort(([a], [b]) => {
+      if (a === "?") return 1;
+      if (b === "?") return -1;
+      return Number(a) - Number(b);
+    });
+  }, [docs, section]);
+
+  // Browse mode: docs of the selected group, bucketed by 2-digit subgroup.
+  const subGroups = useMemo(() => {
+    const out = new Map<string, VidaDoc[]>();
+    if (groupSel === null) return out;
+    for (const d of docs) {
+      if (d.s !== section || (d.g?.[0] ?? "?") !== groupSel) continue;
+      const sub = d.g?.[1] ?? "";
+      if (!out.has(sub)) out.set(sub, []);
+      out.get(sub)!.push(d);
+    }
+    return new Map(
+      [...out.entries()].sort(([a], [b]) =>
+        a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)
+      )
+    );
+  }, [docs, section, groupSel]);
+
+  const groupTitle = (code: string) =>
+    index?.groups?.[code] || (code === "?" ? "Other" : `Group ${code}`);
 
   const diasByGroup = useMemo(() => {
     const out = new Map<string, VidaDiagram[]>();
@@ -211,6 +273,17 @@ export default function Vida() {
       return next;
     });
 
+  const openSelection = (sel: Selection) => {
+    // Push a history entry so Android back returns to the library.
+    window.history.pushState({ vidaViewer: true }, "");
+    setSelected(sel);
+  };
+
+  const closeSelection = () => {
+    if (window.history.state?.vidaViewer) window.history.back();
+    else setSelected(null);
+  };
+
   const openDoc = async (d: VidaDoc) => {
     if (!config) return;
     setLoadingDoc(d.u);
@@ -227,12 +300,22 @@ export default function Vida() {
       html = html.includes("<head>")
         ? html.replace("<head>", `<head>${tag}`)
         : tag + html;
-      setSelected({ kind: "doc", title: d.t, html });
+      openSelection({ kind: "doc", title: d.t, html });
     } catch {
       setDocError(d.u);
     } finally {
       setLoadingDoc(null);
     }
+  };
+
+  const openDiagram = (d: VidaDiagram) => {
+    if (!config) return;
+    openSelection({
+      kind: "diagram",
+      title: `${d.dia} — ${d.name}`,
+      url: `${config.origin}/vida/${d.u}`,
+      dia: d.dia,
+    });
   };
 
   // ---- gates ---------------------------------------------------------------
@@ -367,7 +450,7 @@ export default function Vida() {
     return (
       <div className="space-y-2">
         <button
-          onClick={() => setSelected(null)}
+          onClick={closeSelection}
           className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" /> Back to library
@@ -383,7 +466,7 @@ export default function Vida() {
               className="w-full h-[75vh] bg-white"
             />
           ) : (
-            <div className="w-full h-[75vh] overflow-auto bg-white p-2">
+            <div className="w-full max-h-[70vh] overflow-auto bg-white p-2">
               <img
                 src={selected.url}
                 alt={selected.title}
@@ -392,6 +475,9 @@ export default function Vida() {
             </div>
           )}
         </div>
+        {selected.kind === "diagram" && (
+          <DiagramParts origin={config!.origin} dia={selected.dia} />
+        )}
       </div>
     );
   }
@@ -462,6 +548,29 @@ export default function Vida() {
           </div>
         </div>
 
+        {mode === "docs" && !searching && (
+          <div className="flex gap-1 overflow-x-auto pb-0.5 -mx-1 px-1">
+            {sectionCounts.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  setSection(s.id);
+                  setGroupSel(null);
+                }}
+                className={cn(
+                  "shrink-0 rounded-full border px-2.5 py-1 text-[11px] whitespace-nowrap",
+                  section === s.id
+                    ? "border-orange-500 bg-orange-500/10 text-orange-600 dark:text-orange-400 font-medium"
+                    : "text-muted-foreground hover:bg-muted"
+                )}
+              >
+                {s.label}
+                <span className="ml-1 opacity-70">{s.count}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {docError && (
           <p className="text-xs text-red-600">
             Could not open that document — the content server may be offline.
@@ -470,70 +579,154 @@ export default function Vida() {
       </div>
 
       {mode === "docs" ? (
-        docsByGroup.length === 0 ? (
-          <Empty />
-        ) : (
-          docsByGroup.map(([key, list]) => {
-            const [section, category] = key.split("::");
-            const open = q.length >= 2 || openGroups.has(key);
-            return (
-              <div key={key} className="rounded-lg border overflow-hidden">
+        searching ? (
+          docsByGroup.length === 0 ? (
+            <Empty />
+          ) : (
+            docsByGroup.map(([key, list]) => {
+              const [sec, category] = key.split("::");
+              const open = openGroups.has(key) || searching;
+              return (
+                <div key={key} className="rounded-lg border overflow-hidden">
+                  <button
+                    onClick={() => toggle(key)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/50"
+                  >
+                    <ChevronRight
+                      className={cn(
+                        "h-4 w-4 text-muted-foreground transition-transform",
+                        open && "rotate-90"
+                      )}
+                    />
+                    <span className="text-sm font-medium truncate">{category}</span>
+                    <span className="ml-auto flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {SECTION_LABELS[sec] ?? sec}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">
+                        {list.length}
+                      </span>
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="border-t divide-y">
+                      {list.slice(0, 100).map((d) => (
+                        <DocRow
+                          key={d.u}
+                          d={d}
+                          loading={loadingDoc === d.u}
+                          disabled={loadingDoc !== null}
+                          onOpen={() => void openDoc(d)}
+                        />
+                      ))}
+                      {list.length > 100 && (
+                        <p className="px-3 py-2 text-xs text-muted-foreground">
+                          …and {list.length - 100} more, refine the search
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )
+        ) : groupSel === null ? (
+          // Group picker: VIDA function-group numbers within the section.
+          groupCards.length === 0 ? (
+            <Empty />
+          ) : (
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {groupCards.map(([code, count]) => (
                 <button
-                  onClick={() => toggle(key)}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/50"
+                  key={code}
+                  onClick={() => setGroupSel(code)}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left hover:bg-muted/50"
                 >
-                  <ChevronRight
+                  <span
                     className={cn(
-                      "h-4 w-4 text-muted-foreground transition-transform",
-                      open && "rotate-90"
+                      "shrink-0 rounded px-1.5 py-0.5 text-[11px] font-mono font-semibold",
+                      code === "?"
+                        ? "bg-muted text-muted-foreground"
+                        : "bg-orange-500/10 text-orange-600 dark:text-orange-400"
                     )}
-                  />
-                  <span className="text-sm font-medium truncate">{category}</span>
-                  <span className="ml-auto flex items-center gap-2 shrink-0">
-                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                      {SECTION_LABELS[section] ?? section}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {list.length}
-                    </span>
+                  >
+                    {code === "?" ? "—" : code}
+                  </span>
+                  <span className="text-sm truncate">{groupTitle(code)}</span>
+                  <span className="ml-auto flex items-center gap-1.5 shrink-0 text-[11px] text-muted-foreground">
+                    {count}
+                    <ChevronRight className="h-3.5 w-3.5" />
                   </span>
                 </button>
-                {open && (
-                  <div className="border-t divide-y">
-                    {(q.length >= 2 ? list.slice(0, 100) : list).map((d) => (
-                      <button
-                        key={d.u}
-                        onClick={() => void openDoc(d)}
-                        disabled={loadingDoc !== null}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 disabled:opacity-60"
-                      >
-                        {loadingDoc === d.u ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500 shrink-0" />
-                        ) : (
-                          <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                        )}
-                        <span className="text-sm truncate">{d.t}</span>
-                        <span className="ml-auto text-[10px] text-muted-foreground shrink-0">
-                          {d.m.length === 2 ? "C30+S40" : d.m[0] === 1033 ? "C30" : "S40"}
-                        </span>
-                      </button>
-                    ))}
-                    {q.length >= 2 && list.length > 100 && (
-                      <p className="px-3 py-2 text-xs text-muted-foreground">
-                        …and {list.length - 100} more, refine the search
-                      </p>
+              ))}
+            </div>
+          )
+        ) : (
+          // Subgroup accordions inside the chosen group.
+          <div className="space-y-3">
+            <button
+              onClick={() => setGroupSel(null)}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              {SECTION_LABELS[section] ?? section} — all groups
+            </button>
+            <p className="text-sm font-medium">
+              <span className="font-mono text-orange-600 dark:text-orange-400 mr-1.5">
+                {groupSel === "?" ? "—" : groupSel}
+              </span>
+              {groupTitle(groupSel)}
+            </p>
+            {[...subGroups.entries()].map(([sub, list]) => {
+              const key = `${section}::${groupSel}::${sub}`;
+              const open = openGroups.has(key);
+              return (
+                <div key={key} className="rounded-lg border overflow-hidden">
+                  <button
+                    onClick={() => toggle(key)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/50"
+                  >
+                    <ChevronRight
+                      className={cn(
+                        "h-4 w-4 text-muted-foreground transition-transform",
+                        open && "rotate-90"
+                      )}
+                    />
+                    {sub && (
+                      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                        {sub}
+                      </span>
                     )}
-                  </div>
-                )}
-              </div>
-            );
-          })
+                    <span className="text-sm font-medium truncate capitalize">
+                      {sub ? groupTitle(sub) : "General"}
+                    </span>
+                    <span className="ml-auto text-[11px] text-muted-foreground shrink-0">
+                      {list.length}
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="border-t divide-y">
+                      {list.map((d) => (
+                        <DocRow
+                          key={d.u}
+                          d={d}
+                          loading={loadingDoc === d.u}
+                          disabled={loadingDoc !== null}
+                          onOpen={() => void openDoc(d)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )
       ) : diasByGroup.length === 0 ? (
         <Empty />
       ) : (
         diasByGroup.map(([group, list]) => {
-          const open = q.length >= 2 || openGroups.has(group);
+          const open = searching || openGroups.has(group);
           return (
             <div key={group} className="rounded-lg border overflow-hidden">
               <button
@@ -555,17 +748,10 @@ export default function Vida() {
               </button>
               {open && (
                 <div className="border-t divide-y">
-                  {(q.length >= 2 ? list.slice(0, 100) : list).map((d) => (
+                  {(searching ? list.slice(0, 100) : list).map((d) => (
                     <button
                       key={d.dia}
-                      onClick={() =>
-                        config &&
-                        setSelected({
-                          kind: "diagram",
-                          title: `${d.dia} — ${d.name}`,
-                          url: `${config.origin}/vida/${d.u}`,
-                        })
-                      }
+                      onClick={() => openDiagram(d)}
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50"
                     >
                       <ImageIcon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -577,7 +763,7 @@ export default function Vida() {
                       </span>
                     </button>
                   ))}
-                  {q.length >= 2 && list.length > 100 && (
+                  {searching && list.length > 100 && (
                     <p className="px-3 py-2 text-xs text-muted-foreground">
                       …and {list.length - 100} more, refine the search
                     </p>
@@ -587,6 +773,114 @@ export default function Vida() {
             </div>
           );
         })
+      )}
+    </div>
+  );
+}
+
+function DocRow({
+  d,
+  loading,
+  disabled,
+  onOpen,
+}: {
+  d: VidaDoc;
+  loading: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      onClick={onOpen}
+      disabled={disabled}
+      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 disabled:opacity-60"
+    >
+      {loading ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500 shrink-0" />
+      ) : (
+        <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+      )}
+      <span className="text-sm truncate">{d.t}</span>
+      <span className="ml-auto text-[10px] text-muted-foreground shrink-0">
+        {d.m.length === 2 ? "C30+S40" : d.m[0] === 1033 ? "C30" : "S40"}
+      </span>
+    </button>
+  );
+}
+
+/** Lazily-loaded parts callout list for a parts diagram. */
+function DiagramParts({ origin, dia }: { origin: string; dia: string }) {
+  const [rows, setRows] = useState<PartRow[] | null>(null);
+  const [state, setState] = useState<"loading" | "empty" | "error" | "ok">(
+    "loading"
+  );
+
+  useEffect(() => {
+    let live = true;
+    setState("loading");
+    authedFetch(`${origin}/vida/parts/${dia}.json`)
+      .then((r) => {
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json() as Promise<PartRow[]>;
+      })
+      .then((data) => {
+        if (!live) return;
+        if (!data || data.length === 0) setState("empty");
+        else {
+          setRows(data);
+          setState("ok");
+        }
+      })
+      .catch(() => live && setState("error"));
+    return () => {
+      live = false;
+    };
+  }, [origin, dia]);
+
+  return (
+    <div className="rounded-lg border overflow-hidden">
+      <div className="px-3 py-2 border-b bg-muted/40 text-sm font-medium">
+        Parts in this diagram
+      </div>
+      {state === "loading" && (
+        <p className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading parts list…
+        </p>
+      )}
+      {state === "empty" && (
+        <p className="px-3 py-3 text-sm text-muted-foreground">
+          No parts list is linked to this diagram.
+        </p>
+      )}
+      {state === "error" && (
+        <p className="px-3 py-3 text-sm text-red-600">
+          Could not load the parts list.
+        </p>
+      )}
+      {state === "ok" && rows && (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-3 py-1.5 w-10">Pos</th>
+              <th className="px-3 py-1.5">Part no.</th>
+              <th className="px-3 py-1.5">Description</th>
+              <th className="px-3 py-1.5 w-10 text-right">Qty</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {rows.map(([pos, pn, name, qty], i) => (
+              <tr key={`${pos}-${pn}-${i}`}>
+                <td className="px-3 py-1.5 font-mono text-xs">{pos}</td>
+                <td className="px-3 py-1.5 font-mono text-xs whitespace-nowrap">
+                  {pn}
+                </td>
+                <td className="px-3 py-1.5">{name}</td>
+                <td className="px-3 py-1.5 text-right text-xs">{qty}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );

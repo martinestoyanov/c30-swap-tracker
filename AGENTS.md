@@ -34,9 +34,10 @@ public/manifest.webmanifest PWA manifest (start_url/scope are "./" on purpose)
 public/sw.js                Service worker v3: offline shell; Firebase traffic NEVER cached;
                             VIDA origin requests get auth header injected + cache-first (§10)
 public/icons/               Generated PWA icons (regenerate with ../../make_icons.py)
-vida-server/                Committed copy of the home-server stack (compose, Caddyfile,
-                            Dockerfile.caddy, FastAPI app, test_auth.py) — deploy target is
-                            /opt/vida-tracker on the Docker host; see §10
+vida-server/                Committed copy of the home-server stack (compose + FastAPI
+                            app + test_auth.py) — deploy target is /opt/vida-tracker on
+                            the Docker host; see §10. (Caddy/duckdns sidecar retired
+                            2026-08-05 in favor of Tailscale Funnel.)
 firestore.rules             THE security model — deployed to Firebase, see §3
 firebase.json / .firebaserc firebase deploy config (project: c30-swap-tracker).
                             Also has a hosting block (dist + SPA rewrite) — Firebase Hosting
@@ -160,8 +161,8 @@ curl -X PATCH "$DOC" -d '{...}'              # 403 (public write blocked)
 11. **T-Mobile and corporate networks filter egress to non-standard ports.** The VIDA
     service launched on :8443 and was unreachable from T-Mobile cell data and the
     owner's work network while answering fine from the open internet. Public-facing
-    home services must live on 443 (or 80). The 8443 listener may still exist in the
-    Caddyfile as a transition leftover — it is safe to remove along with its router rule.
+    home services must live on 443 (or 80). The 8443 listener and its router
+    rule were removed 2026-08-05 along with the Caddy sidecar.
 12. **The home ISP blocks INBOUND 443/80 (residential port block)** — proven 2026-08-05:
     hairpin (LAN→WAN IP) worked and DuckDNS was fine, but independent external probes
     (allorigins, jina) could not reach :443, while :8443 inbound had worked. Combined
@@ -191,16 +192,25 @@ sidebar/breadcrumbs, keeps relative refs, originals never modified) → `pack` (
   Enabled via `tailscale funnel --bg --https=443 8100`; requires the `funnel`
   nodeAttr in the tailnet policy (enabled 2026-08-05) and operator rights
   (`tailscale set --operator=casita` done). Check with `tailscale funnel status`.
-- `caddy` (SECONDARY, LAN/hairpin only) — custom image with `caddy-dns/duckdns`,
-  serving `casitaor.duckdns.org` on 443 + 8443. The home ISP blocks inbound
-  443/80 (gotcha 12), so this path only works from the LAN. Kept for local use;
-  cert renewal via DNS-01 needs no inbound. Token in `/opt/vida-tracker/.env`.
 - `vida-auth` — FastAPI (`vida-server/app/main.py`). Every `/vida/*` request needs
   `Authorization: Bearer <Firebase ID token>`; verifies RS256 against Google certs,
   checks `email in ALLOWED_EMAILS` (martin/evi), caches verified tokens until their
   `exp`. Serves `/opt/vida-tracker/content/vida` read-only; path traversal blocked;
   CORS limited to the tracker origins. `/healthz` is open (uptime checks).
-  Bound on host as `127.0.0.1:8100` (Portainer owns 8000).
+  Bound on host as `127.0.0.1:8100` (Portainer owns 8000). It is now the ONLY
+  service in the stack — the Caddy/duckdns TLS sidecar was retired 2026-08-05
+  (compose, volumes, Caddyfile, Dockerfile.caddy all removed) after Funnel
+  proved to work from cell networks. The duckdns hostname and the router's
+  port-forward rules are unused leftovers; the DuckDNS token in
+  `/opt/vida-tracker/.env` is no longer referenced by the compose file.
+
+**Content layout.** `/opt/vida-tracker/content/vida/` holds `index.json`,
+`docs/…`, `diagrams/…`, images, and `parts/GR-*.json` (974 files, added
+2026-08-05). `index.json` v2: docs carry `g` (VIDA function-group path, e.g.
+`["2","21"]`, or `["?"]` for docs VIDA never grouped) and a top-level `groups`
+map (code → title) drives the in-app group navigation. `parts/<dia>.json` is a
+compact array of `[pos, partNo, name, qty]` rows filtered to models 1033/1014,
+fetched lazily by the diagram viewer (404 = no parts list for that diagram).
 
 **App flow.** `Vida.tsx` reads the origin from Firestore doc
 `projects/c30-awd-swap/state/vida` (auth-only read in firestore.rules; fields:
@@ -215,7 +225,7 @@ responses cache-first for offline garage use.
 ```bash
 ssh -i ~/.ssh/casita_ed25519 casita@192.168.1.10
 cd /opt/vida-tracker
-docker compose ps && docker compose logs -f caddy      # status / cert events
+docker compose ps && docker compose logs -f vida-auth    # status / request log
 docker compose restart vida-auth                       # after app/main.py changes
 # smoke test (mint a token via accounts:signInWithPassword first):
 docker compose exec -T -e TEST_TOKEN=<idToken> vida-auth python - < test_auth.py
@@ -226,8 +236,9 @@ Expected: healthz 200; no-auth/bogus → 401; real token → 200; traversal → 
 `/opt/vida-tracker/content/` — no restart needed (files served from disk).
 
 **Moving/changing the origin** (new hostname or port): update the Firestore vida
-doc's `origin` field — the app picks it up with no redeploy — plus Caddyfile,
-compose ports, and the router forward.
+doc's `origin` field — the app picks it up with no redeploy — plus the funnel
+mapping on the server (`tailscale funnel --bg http://127.0.0.1:<port>`) and the
+vida-auth host bind in compose.
 
 ## 8. Related project artifacts (same workspace)
 

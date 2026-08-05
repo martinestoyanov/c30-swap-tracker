@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Overview from "@/sections/Overview";
 import AuthButton from "@/components/AuthButton";
+import InstallButton from "@/components/InstallButton";
 import Phases from "@/sections/Phases";
 import Parts from "@/sections/Parts";
 import Budget from "@/sections/Budget";
@@ -41,6 +42,7 @@ export default function Home() {
             ) : (
               <span className="flex items-center gap-1"><HardDrive className="h-3.5 w-3.5" /> Local only</span>
             )}
+            <InstallButton />
             <AuthButton />
           </div>
         </div>
