@@ -2,15 +2,15 @@
 # Self-contained stack — separate compose project, own network, does NOT
 # touch any existing services on this host. Deploy to /opt/vida-tracker.
 #
-#   caddy     — TLS for casitaor.duckdns.org:8443 via DNS-01 challenge
-#               (DuckDNS API). NO ports 80/443 exposed at all.
 #   vida-auth — FastAPI: verifies Firebase ID tokens, serves /content read-only
 #
-# Router (FreshTomato): single forward WAN TCP 8443 -> 192.168.1.10:8443.
-# Cert issuance/renewal happens over DNS — no inbound HTTP needed.
+# External access is via Tailscale FUNNEL (outbound tunnel — no inbound
+# router ports needed; the home ISP blocks 80/443 inbound anyway):
+#   tailscale funnel --bg http://127.0.0.1:8100
+#   => https://casita-ha.tail162aff.ts.net -> http://127.0.0.1:8100
 #
-# Requires .env alongside this file (never committed):
-#   DUCKDNS_TOKEN=<token from https://www.duckdns.org>
+# History: a Caddy TLS sidecar (duckdns DNS-01, ports 443/8443) was retired
+# 2026-08-05 after Funnel proved to work from cell networks.
 
 services:
   vida-auth:
@@ -26,22 +26,3 @@ services:
       - "8000"
     ports:
       - "127.0.0.1:8100:8000"  # host-local only: Tailscale Funnel proxies here
-
-  caddy:
-    build:
-      context: .
-      dockerfile: Dockerfile.caddy
-    restart: unless-stopped
-    ports:
-      - "443:443"
-      - "8443:8443"
-    environment:
-      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?set DUCKDNS_TOKEN in .env}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
