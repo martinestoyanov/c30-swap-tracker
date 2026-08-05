@@ -24,6 +24,8 @@ services:
       - ./content:/content:ro
     expose:
       - "8000"
+    ports:
+      - "127.0.0.1:8100:8000"  # host-local only: Tailscale Funnel proxies here
 
   caddy:
     build:

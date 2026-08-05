@@ -17,7 +17,7 @@ VIDA (auth-gated workshop manual library — see §10).
 | **Repo** | https://github.com/martinestoyanov/c30-swap-tracker | Public by design (no secrets in it) |
 | **Local dev** | http://localhost:8080 | `npm run dev`, strictPort |
 | **Tailscale (LAN fallback)** | http://100.124.10.99:8080 | PC "obelisk"; needs Tailscale running + firewall rule |
-| **VIDA content service** | https://casitaor.duckdns.org (443) | Home Docker host, Firebase-token gated; see §10 |
+| **VIDA content service** | https://casita-ha.tail162aff.ts.net (443) | Tailscale Funnel → home Docker host, Firebase-token gated; see §10 |
 
 ## 2. Repository layout
 
@@ -162,6 +162,16 @@ curl -X PATCH "$DOC" -d '{...}'              # 403 (public write blocked)
     owner's work network while answering fine from the open internet. Public-facing
     home services must live on 443 (or 80). The 8443 listener may still exist in the
     Caddyfile as a transition leftover — it is safe to remove along with its router rule.
+12. **The home ISP blocks INBOUND 443/80 (residential port block)** — proven 2026-08-05:
+    hairpin (LAN→WAN IP) worked and DuckDNS was fine, but independent external probes
+    (allorigins, jina) could not reach :443, while :8443 inbound had worked. Combined
+    with gotcha 11, NO static inbound port satisfies both sides. That deadlock is why
+    the public path is Tailscale Funnel (outbound tunnel), not router port forwarding.
+    ERR_CONNECTION_CLOSED on the phone (not NAME_NOT_RESOLVED) was the tell that it
+    wasn't DNS. Funnel gotchas: needs `funnel` nodeAttr in tailnet policy (enable via
+    the link `tailscale funnel` prints), and root/operator on the node
+    (`sudo tailscale set --operator=casita`). Portainer owns host :8000 — vida-auth
+    binds 127.0.0.1:8100 instead.
 
 ## 10. VIDA workshop library (home-server content service)
 
@@ -172,19 +182,25 @@ Import pipeline: `..\vida-import\import_vida.py` in the Kimi workspace (NOT in t
 contains staging artifacts). Stages: `manifest` → `process` (strips scripts/header/
 sidebar/breadcrumbs, keeps relative refs, originals never modified) → `pack` (tarball).
 
-**Server.** Docker host `casita` (192.168.1.10), stack at `/opt/vida-tracker/`
+**Server.** Docker host `casita-ha` (192.168.1.10), stack at `/opt/vida-tracker/`
 (committed copy in `vida-server/`; compose project `vida-tracker`):
 
-- `caddy` — custom image (Dockerfile.caddy) with the `caddy-dns/duckdns` plugin.
-  TLS for `casitaor.duckdns.org` via **DNS-01** — port 80 is NOT published;
-  cert renewal needs no inbound HTTP. Router (FreshTomato) forwards WAN TCP 443 →
-  192.168.1.10:443. (Served on 8443 briefly — see gotcha 11.) Token in
-  `/opt/vida-tracker/.env` (`DUCKDNS_TOKEN=...`).
+- **Tailscale Funnel (PRIMARY, public path).** The server funnels outbound to
+  Tailscale's edge: `https://casita-ha.tail162aff.ts.net` (443, automatic cert,
+  IPv4+IPv6 DNS) proxies to `http://127.0.0.1:8100` (vida-auth host bind).
+  Enabled via `tailscale funnel --bg --https=443 8100`; requires the `funnel`
+  nodeAttr in the tailnet policy (enabled 2026-08-05) and operator rights
+  (`tailscale set --operator=casita` done). Check with `tailscale funnel status`.
+- `caddy` (SECONDARY, LAN/hairpin only) — custom image with `caddy-dns/duckdns`,
+  serving `casitaor.duckdns.org` on 443 + 8443. The home ISP blocks inbound
+  443/80 (gotcha 12), so this path only works from the LAN. Kept for local use;
+  cert renewal via DNS-01 needs no inbound. Token in `/opt/vida-tracker/.env`.
 - `vida-auth` — FastAPI (`vida-server/app/main.py`). Every `/vida/*` request needs
   `Authorization: Bearer <Firebase ID token>`; verifies RS256 against Google certs,
   checks `email in ALLOWED_EMAILS` (martin/evi), caches verified tokens until their
   `exp`. Serves `/opt/vida-tracker/content/vida` read-only; path traversal blocked;
   CORS limited to the tracker origins. `/healthz` is open (uptime checks).
+  Bound on host as `127.0.0.1:8100` (Portainer owns 8000).
 
 **App flow.** `Vida.tsx` reads the origin from Firestore doc
 `projects/c30-awd-swap/state/vida` (auth-only read in firestore.rules; fields:
