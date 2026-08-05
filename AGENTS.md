@@ -17,7 +17,7 @@ VIDA (auth-gated workshop manual library — see §10).
 | **Repo** | https://github.com/martinestoyanov/c30-swap-tracker | Public by design (no secrets in it) |
 | **Local dev** | http://localhost:8080 | `npm run dev`, strictPort |
 | **Tailscale (LAN fallback)** | http://100.124.10.99:8080 | PC "obelisk"; needs Tailscale running + firewall rule |
-| **VIDA content service** | https://casitaor.duckdns.org:8443 | Home Docker host, Firebase-token gated; see §10 |
+| **VIDA content service** | https://casitaor.duckdns.org (443) | Home Docker host, Firebase-token gated; see §10 |
 
 ## 2. Repository layout
 
@@ -157,6 +157,11 @@ curl -X PATCH "$DOC" -d '{...}'              # 403 (public write blocked)
 10. Docker host compose conventions: existing stacks (homelab, watchtower) have stale
     config paths (/data/compose/... doesn't exist) — hands off. Watchtower only updates
     registry images; vida-tracker's images are locally built and left alone.
+11. **T-Mobile and corporate networks filter egress to non-standard ports.** The VIDA
+    service launched on :8443 and was unreachable from T-Mobile cell data and the
+    owner's work network while answering fine from the open internet. Public-facing
+    home services must live on 443 (or 80). The 8443 listener may still exist in the
+    Caddyfile as a transition leftover — it is safe to remove along with its router rule.
 
 ## 10. VIDA workshop library (home-server content service)
 
@@ -171,9 +176,10 @@ sidebar/breadcrumbs, keeps relative refs, originals never modified) → `pack` (
 (committed copy in `vida-server/`; compose project `vida-tracker`):
 
 - `caddy` — custom image (Dockerfile.caddy) with the `caddy-dns/duckdns` plugin.
-  TLS for `casitaor.duckdns.org:8443` via **DNS-01** — ports 80/443 are NOT published;
-  cert renewal needs no inbound HTTP. Router (FreshTomato) forwards WAN TCP 8443 →
-  192.168.1.10:8443. Token in `/opt/vida-tracker/.env` (`DUCKDNS_TOKEN=...`).
+  TLS for `casitaor.duckdns.org` via **DNS-01** — port 80 is NOT published;
+  cert renewal needs no inbound HTTP. Router (FreshTomato) forwards WAN TCP 443 →
+  192.168.1.10:443. (Served on 8443 briefly — see gotcha 11.) Token in
+  `/opt/vida-tracker/.env` (`DUCKDNS_TOKEN=...`).
 - `vida-auth` — FastAPI (`vida-server/app/main.py`). Every `/vida/*` request needs
   `Authorization: Bearer <Firebase ID token>`; verifies RS256 against Google certs,
   checks `email in ALLOWED_EMAILS` (martin/evi), caches verified tokens until their
