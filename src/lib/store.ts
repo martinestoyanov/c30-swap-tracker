@@ -1,0 +1,170 @@
+// Unified state store: localStorage always works offline; when Firebase env
+// config is present (.env.local locally / GitHub Secrets in CI), the same
+// state syncs in real time across every device and collaborator.
+//
+// Security model (deployed site):
+//   - READ  : public (anyone can view the tracker)
+//   - WRITE : only signed-in allowed accounts (enforced by firestore.rules)
+//   - Accounts are Firebase email/password users, mapped from simple
+//     usernames: "martin" -> martin@c30swap.app. No passwords in this repo.
+//
+// State shape (single Firestore doc: projects/c30-awd-swap/state/shared):
+//   tasks:  string[]                checked phase task ids
+//   verify: string[]                checked verification item ids
+//   prices: Record<string, string>  part id -> current price text
+
+export interface SharedState {
+  tasks: string[];
+  verify: string[];
+  prices: Record<string, string>;
+}
+
+const LOCAL_KEY = "c30-shared-state-v1";
+const EMPTY: SharedState = { tasks: [], verify: [], prices: {} };
+
+function loadLocal(): SharedState {
+  try {
+    const raw = localStorage.getItem(LOCAL_KEY);
+    if (raw) return { ...EMPTY, ...(JSON.parse(raw) as SharedState) };
+    // One-time migration from the pre-sync per-hook keys
+    const tasks = JSON.parse(localStorage.getItem("c30-phase-tasks") ?? "[]");
+    const verify = JSON.parse(localStorage.getItem("c30-verify-items") ?? "[]");
+    const prices = JSON.parse(localStorage.getItem("c30-part-prices") ?? "{}");
+    return { tasks, verify, prices };
+  } catch {
+    return { ...EMPTY };
+  }
+}
+
+let current: SharedState = loadLocal();
+const listeners = new Set<() => void>();
+let writeRemote: ((s: SharedState) => void) | null = null;
+let writeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function saveLocal() {
+  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(current)); } catch { /* ignore */ }
+}
+
+function emit() {
+  saveLocal();
+  listeners.forEach((fn) => fn());
+  if (writeRemote) {
+    if (writeTimer) clearTimeout(writeTimer);
+    writeTimer = setTimeout(() => writeRemote?.(current), 400); // debounce bursts
+  }
+}
+
+export function getState(): SharedState {
+  return current;
+}
+
+export function subscribe(fn: () => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+export function mutate(fn: (s: SharedState) => SharedState): void {
+  current = fn(current);
+  emit();
+}
+
+// ---------------------------------------------------------------------------
+// Auth state
+// ---------------------------------------------------------------------------
+export interface AuthSnapshot {
+  user: string | null; // display username, e.g. "martin"
+  ready: boolean;      // false until first auth event (or sync disabled)
+}
+
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string | undefined,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string | undefined,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string | undefined,
+};
+
+export const SYNC_ENABLED = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
+
+const AUTH_DOMAIN_SUFFIX = "@c30swap.app";
+
+let authSnap: AuthSnapshot = { user: null, ready: !SYNC_ENABLED };
+const authListeners = new Set<() => void>();
+let authApi: {
+  signIn: (username: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+} | null = null;
+
+function setAuth(user: string | null) {
+  authSnap = { user, ready: true };
+  authListeners.forEach((fn) => fn());
+}
+
+export function getAuth(): AuthSnapshot {
+  return authSnap;
+}
+
+export function subscribeAuth(fn: () => void): () => void {
+  authListeners.add(fn);
+  return () => authListeners.delete(fn);
+}
+
+/** Editing is always allowed in local-only mode; in sync mode it needs login. */
+export function canEdit(): boolean {
+  return !SYNC_ENABLED || authSnap.user !== null;
+}
+
+export async function signIn(username: string, password: string): Promise<void> {
+  if (!authApi) throw new Error("Cloud sync is not configured on this build.");
+  await authApi.signIn(username.trim().toLowerCase(), password);
+}
+
+export async function signOut(): Promise<void> {
+  await authApi?.signOut();
+}
+
+// ---------------------------------------------------------------------------
+// Firebase wiring (dynamic import: only loaded when config is present)
+// ---------------------------------------------------------------------------
+export async function initSync(): Promise<void> {
+  if (!SYNC_ENABLED) return;
+  try {
+    const [{ initializeApp }, authMod, firestore] = await Promise.all([
+      import("firebase/app"),
+      import("firebase/auth"),
+      import("firebase/firestore"),
+    ]);
+    const app = initializeApp(firebaseConfig);
+    const auth = authMod.getAuth(app);
+
+    authMod.onAuthStateChanged(auth, (u) => {
+      setAuth(u?.email ? u.email.replace(AUTH_DOMAIN_SUFFIX, "") : null);
+    });
+    authApi = {
+      signIn: async (username, password) => {
+        await authMod.signInWithEmailAndPassword(auth, username + AUTH_DOMAIN_SUFFIX, password);
+      },
+      signOut: () => authMod.signOut(auth),
+    };
+
+    const { getFirestore, doc, onSnapshot, setDoc } = firestore;
+    const ref = doc(getFirestore(app), "projects/c30-awd-swap/state/shared");
+
+    let applyingRemote = false;
+    onSnapshot(ref, (snap) => {
+      if (!snap.exists()) return;
+      applyingRemote = true;
+      current = { ...EMPTY, ...(snap.data() as SharedState) };
+      saveLocal();
+      listeners.forEach((fn) => fn());
+      applyingRemote = false;
+    });
+
+    writeRemote = (s) => {
+      if (applyingRemote) return;
+      setDoc(ref, { ...s, updatedAt: new Date().toISOString() }, { merge: true }).catch(() => {
+        /* unauthenticated writes are rejected by rules; local copy kept */
+      });
+    };
+  } catch (err) {
+    console.warn("Cloud sync unavailable, continuing local-only:", err);
+  }
+}
