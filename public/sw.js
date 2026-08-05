@@ -1,32 +1,55 @@
 // C30 AWD Swap Tracker service worker.
-// Strategy: app shell works offline after first visit; live data (Firestore)
-// always goes to the network and is never cached here. VIDA library files on
-// Firebase Storage use immutable token URLs, so they are cached cache-first
-// for offline reading on Android/iOS.
-const CACHE = "c30-tracker-v2";
+// Strategy:
+//  - App shell works offline after first visit.
+//  - Live data (Firestore) always goes to the network, never cached.
+//  - VIDA library lives on the home server (vida origin, learned at runtime).
+//    The page posts the current Firebase ID token via SET_VIDA_AUTH; every
+//    request to the vida origin gets an Authorization header injected here,
+//    and successful responses are cached cache-first for offline garage use.
+const CACHE = "c30-tracker-v3";
+
+let vidaOrigin = null;
+let vidaToken = null;
+
+self.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "SET_VIDA_AUTH") {
+    vidaOrigin = e.data.origin || null;
+    vidaToken = e.data.token || null;
+  }
+});
 
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("activate", (e) =>
+  e.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  )
+);
+
+function vidaFetch(request) {
+  return caches.match(request).then((hit) => {
+    if (hit) return hit;
+    const headers = new Headers(request.headers);
+    if (vidaToken) headers.set("Authorization", "Bearer " + vidaToken);
+    return fetch(request.url, { method: "GET", headers, credentials: "omit" }).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(request, copy));
+      }
+      return res;
+    });
+  });
+}
 
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
 
-  // VIDA docs/images/diagrams on Firebase Storage: cache-first.
-  if (url.origin === "https://firebasestorage.googleapis.com") {
-    e.respondWith(
-      caches.match(e.request).then(
-        (hit) =>
-          hit ||
-          fetch(e.request).then((res) => {
-            if (res.ok) {
-              const copy = res.clone();
-              caches.open(CACHE).then((c) => c.put(e.request, copy));
-            }
-            return res;
-          })
-      )
-    );
+  // VIDA content origin: auth-injecting cache-first.
+  if (vidaOrigin && url.href.startsWith(vidaOrigin)) {
+    e.respondWith(vidaFetch(e.request));
     return;
   }
 

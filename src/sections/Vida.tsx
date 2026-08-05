@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { getVidaConfig, type VidaConfig } from "@/lib/store";
+import {
+  getVidaConfig,
+  getFreshIdToken,
+  syncVidaAuth,
+  pokeVidaAuth,
+  type VidaConfig,
+} from "@/lib/store";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -18,14 +24,14 @@ interface VidaDoc {
   c: string;
   s: string;
   m: number[];
-  url: string;
+  u: string; // relative path under /vida/
 }
 interface VidaDiagram {
   dia: string;
   name: string;
   group: string;
   m: number[];
-  url: string;
+  u: string;
 }
 interface VidaIndex {
   generated: string;
@@ -55,8 +61,19 @@ const pretty = (s: string) =>
   s.replace(/-/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
 
 type Selection =
-  | { kind: "doc"; title: string; url: string }
+  | { kind: "doc"; title: string; html: string }
   | { kind: "diagram"; title: string; url: string };
+
+/** Fetch with an explicit Firebase token (independent of SW state). */
+async function authedFetch(url: string, retry = true): Promise<Response> {
+  pokeVidaAuth(); // keep the SW's token fresh for subresource requests
+  const token = await getFreshIdToken();
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (res.status === 401 && retry) return authedFetch(url, false);
+  return res;
+}
 
 export default function Vida() {
   const { user, ready, syncEnabled } = useAuth();
@@ -70,6 +87,8 @@ export default function Vida() {
   const [query, setQuery] = useState("");
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Selection | null>(null);
+  const [loadingDoc, setLoadingDoc] = useState<string | null>(null);
+  const [docError, setDocError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) {
@@ -84,6 +103,7 @@ export default function Vida() {
       if (!live) return;
       setConfig(cfg);
       setConfigTried(true);
+      if (cfg) void syncVidaAuth(cfg.origin);
     });
     return () => {
       live = false;
@@ -91,9 +111,9 @@ export default function Vida() {
   }, [user]);
 
   useEffect(() => {
-    if (!config?.indexUrl || index) return;
+    if (!config?.origin || index) return;
     let live = true;
-    fetch(config.indexUrl)
+    authedFetch(`${config.origin}/vida/index.json`)
       .then((r) => {
         if (!r.ok) throw new Error(String(r.status));
         return r.json() as Promise<VidaIndex>;
@@ -160,6 +180,30 @@ export default function Vida() {
       return next;
     });
 
+  const openDoc = async (d: VidaDoc) => {
+    if (!config) return;
+    setLoadingDoc(d.u);
+    setDocError(null);
+    try {
+      const url = `${config.origin}/vida/${d.u}`;
+      const res = await authedFetch(url);
+      if (!res.ok) throw new Error(String(res.status));
+      let html = await res.text();
+      // srcdoc iframes inherit the app origin; point relative refs at the
+      // vida origin so images/css resolve (SW attaches auth to those).
+      const base = `${config.origin}/vida/${d.u.slice(0, d.u.lastIndexOf("/") + 1)}`;
+      const tag = `<base href="${base}">`;
+      html = html.includes("<head>")
+        ? html.replace("<head>", `<head>${tag}`)
+        : tag + html;
+      setSelected({ kind: "doc", title: d.t, html });
+    } catch {
+      setDocError(d.u);
+    } finally {
+      setLoadingDoc(null);
+    }
+  };
+
   // ---- gates ---------------------------------------------------------------
 
   if (!syncEnabled) {
@@ -208,7 +252,8 @@ export default function Vida() {
           <p className="text-sm font-medium">VIDA import pending</p>
           <p className="text-sm text-muted-foreground mt-1">
             The workshop manual subset (2,528 documents, 981 parts diagrams) is
-            being staged into cloud storage. Check back after the next deploy.
+            being staged onto the home content server. Check back after the
+            next sync.
           </p>
         </div>
       </Card>
@@ -219,7 +264,8 @@ export default function Vida() {
     return (
       <Card>
         <p className="text-sm text-red-600">
-          Could not load the VIDA index. Check your connection and try again.
+          Could not reach the VIDA content server. It may be offline — cached
+          documents still open from this device.
         </p>
       </Card>
     );
@@ -229,9 +275,7 @@ export default function Vida() {
     return (
       <Card>
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">
-          Downloading VIDA index…
-        </p>
+        <p className="text-sm text-muted-foreground">Downloading VIDA index…</p>
       </Card>
     );
   }
@@ -253,7 +297,7 @@ export default function Vida() {
           </div>
           {selected.kind === "doc" ? (
             <iframe
-              src={selected.url}
+              srcDoc={selected.html}
               title={selected.title}
               className="w-full h-[75vh] bg-white"
             />
@@ -329,6 +373,12 @@ export default function Vida() {
             ))}
           </div>
         </div>
+
+        {docError && (
+          <p className="text-xs text-red-600">
+            Could not open that document — the content server may be offline.
+          </p>
+        )}
       </div>
 
       {mode === "docs" ? (
@@ -364,13 +414,16 @@ export default function Vida() {
                   <div className="border-t divide-y">
                     {(q.length >= 2 ? list.slice(0, 100) : list).map((d) => (
                       <button
-                        key={d.url}
-                        onClick={() =>
-                          setSelected({ kind: "doc", title: d.t, url: d.url })
-                        }
-                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50"
+                        key={d.u}
+                        onClick={() => void openDoc(d)}
+                        disabled={loadingDoc !== null}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 disabled:opacity-60"
                       >
-                        <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        {loadingDoc === d.u ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500 shrink-0" />
+                        ) : (
+                          <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        )}
                         <span className="text-sm truncate">{d.t}</span>
                         <span className="ml-auto text-[10px] text-muted-foreground shrink-0">
                           {d.m.length === 2 ? "C30+S40" : d.m[0] === 1033 ? "C30" : "S40"}
@@ -418,10 +471,11 @@ export default function Vida() {
                     <button
                       key={d.dia}
                       onClick={() =>
+                        config &&
                         setSelected({
                           kind: "diagram",
                           title: `${d.dia} — ${d.name}`,
-                          url: d.url,
+                          url: `${config.origin}/vida/${d.u}`,
                         })
                       }
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50"

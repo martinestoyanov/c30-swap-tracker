@@ -122,7 +122,7 @@ export async function signOut(): Promise<void> {
 }
 
 export interface VidaConfig {
-  indexUrl: string;
+  origin: string; // e.g. https://casitaor.duckdns.org (home vida-auth service)
   updatedAt: string;
   docs: number;
   images: number;
@@ -130,9 +130,9 @@ export interface VidaConfig {
 }
 
 /**
- * One-shot read of the VIDA import config doc. Firestore rules restrict this
+ * One-shot read of the VIDA config doc. Firestore rules restrict this
  * document to the two project accounts, so call it only when signed in.
- * Returns null when the import has not run yet (or on any error).
+ * Returns null when the import has not been configured yet (or on error).
  */
 export async function getVidaConfig(): Promise<VidaConfig | null> {
   if (!SYNC_ENABLED) return null;
@@ -149,8 +149,9 @@ export async function getVidaConfig(): Promise<VidaConfig | null> {
     const snap = await firestore.getDoc(ref);
     if (!snap.exists()) return null;
     const d = snap.data() as Record<string, unknown>;
+    if (!d.origin) return null;
     return {
-      indexUrl: String(d.indexUrl ?? ""),
+      origin: String(d.origin).replace(/\/+$/, ""),
       updatedAt: String(d.updatedAt ?? ""),
       docs: Number(d.docs ?? 0),
       images: Number(d.images ?? 0),
@@ -159,6 +160,72 @@ export async function getVidaConfig(): Promise<VidaConfig | null> {
   } catch (err) {
     console.warn("VIDA config unavailable:", err);
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VIDA auth bridge: keeps the service worker supplied with a fresh Firebase
+// ID token so it can attach Authorization headers to vida-origin requests.
+// ---------------------------------------------------------------------------
+let vidaAuthLast: { origin: string; token: string | null } | null = null;
+let vidaAuthWired = false;
+
+function postVidaAuth() {
+  if (!vidaAuthLast) return;
+  navigator.serviceWorker?.controller?.postMessage({
+    type: "SET_VIDA_AUTH",
+    ...vidaAuthLast,
+  });
+}
+
+/** Re-post the last known VIDA origin/token to the SW (call before fetches). */
+export function pokeVidaAuth() {
+  postVidaAuth();
+}
+
+/** Fresh Firebase ID token for the current user (null if signed out). */
+export async function getFreshIdToken(): Promise<string | null> {
+  if (!SYNC_ENABLED) return null;
+  try {
+    const [{ getApps, getApp, initializeApp }, authMod] = await Promise.all([
+      import("firebase/app"),
+      import("firebase/auth"),
+    ]);
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    return (await authMod.getAuth(app).currentUser?.getIdToken()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wire Firebase ID-token events to the service worker. Idempotent.
+ * Call once the signed-in user opens the VIDA section.
+ */
+export async function syncVidaAuth(origin: string): Promise<void> {
+  if (!SYNC_ENABLED || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  try {
+    const [{ getApps, getApp, initializeApp }, authMod] = await Promise.all([
+      import("firebase/app"),
+      import("firebase/auth"),
+    ]);
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    const auth = authMod.getAuth(app);
+
+    const push = async () => {
+      const u = auth.currentUser;
+      vidaAuthLast = { origin, token: u ? await u.getIdToken() : null };
+      postVidaAuth();
+    };
+
+    await push();
+    if (!vidaAuthWired) {
+      vidaAuthWired = true;
+      authMod.onIdTokenChanged(auth, () => void push());
+      navigator.serviceWorker.addEventListener("controllerchange", postVidaAuth);
+    }
+  } catch (err) {
+    console.warn("VIDA auth sync unavailable:", err);
   }
 }
 
