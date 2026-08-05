@@ -1,0 +1,23 @@
+rules_version = '2';
+// Cloud Storage security rules for the C30 AWD Swap tracker.
+// Holds the imported VIDA manual section (docs, images, diagrams).
+//
+// Model: AUTHENTICATED READ/WRITE for the two project accounts only.
+//   - The VIDA library is licensed Volvo workshop material, so unlike the
+//     Firestore tracker state it is NOT world-readable.
+//   - Only martin@c30swap.app and evi@c30swap.app may read or write.
+//   - The web app accesses files via per-file download tokens embedded at
+//     import time (unguessable links); these rules still block listing and
+//     direct API access for everyone else.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if request.auth != null
+        && request.auth.token.email in [
+          'martin@c30swap.app',
+          'evi@c30swap.app'
+        ];
+    }
+  }
+}

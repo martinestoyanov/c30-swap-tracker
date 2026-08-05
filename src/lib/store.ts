@@ -121,6 +121,47 @@ export async function signOut(): Promise<void> {
   await authApi?.signOut();
 }
 
+export interface VidaConfig {
+  indexUrl: string;
+  updatedAt: string;
+  docs: number;
+  images: number;
+  diagrams: number;
+}
+
+/**
+ * One-shot read of the VIDA import config doc. Firestore rules restrict this
+ * document to the two project accounts, so call it only when signed in.
+ * Returns null when the import has not run yet (or on any error).
+ */
+export async function getVidaConfig(): Promise<VidaConfig | null> {
+  if (!SYNC_ENABLED) return null;
+  try {
+    const [{ getApps, getApp, initializeApp }, firestore] = await Promise.all([
+      import("firebase/app"),
+      import("firebase/firestore"),
+    ]);
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    const ref = firestore.doc(
+      firestore.getFirestore(app),
+      "projects/c30-awd-swap/state/vida"
+    );
+    const snap = await firestore.getDoc(ref);
+    if (!snap.exists()) return null;
+    const d = snap.data() as Record<string, unknown>;
+    return {
+      indexUrl: String(d.indexUrl ?? ""),
+      updatedAt: String(d.updatedAt ?? ""),
+      docs: Number(d.docs ?? 0),
+      images: Number(d.images ?? 0),
+      diagrams: Number(d.diagrams ?? 0),
+    };
+  } catch (err) {
+    console.warn("VIDA config unavailable:", err);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Firebase wiring (dynamic import: only loaded when config is present)
 // ---------------------------------------------------------------------------

@@ -19,5 +19,19 @@ service cloud.firestore {
           'evi@c30swap.app'
         ];
     }
+
+    // VIDA import config: holds the Storage index URL for the workshop
+    // manual section. Auth-only read — the index URL chains to every
+    // imported document, so it must not leak to anonymous users.
+    // Writes come from the import script with project-owner credentials
+    // (admin path bypasses these rules), so client writes are denied.
+    match /projects/c30-awd-swap/state/vida {
+      allow read: if request.auth != null
+        && request.auth.token.email in [
+          'martin@c30swap.app',
+          'evi@c30swap.app'
+        ];
+      allow write: if false;
+    }
   }
 }

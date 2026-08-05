@@ -5,7 +5,8 @@ import Phases from "@/sections/Phases";
 import Parts from "@/sections/Parts";
 import Budget from "@/sections/Budget";
 import Docs from "@/sections/Docs";
-import { LayoutDashboard, ListChecks, ShoppingCart, Wallet, BookOpen, Wrench, Cloud, HardDrive } from "lucide-react";
+import Vida from "@/sections/Vida";
+import { LayoutDashboard, ListChecks, ShoppingCart, Wallet, BookOpen, BookMarked, Wrench, Cloud, HardDrive } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SYNC_ENABLED } from "@/lib/store";
 
@@ -15,6 +16,7 @@ const TABS = [
   { id: "parts", label: "Parts", icon: ShoppingCart, el: <Parts /> },
   { id: "budget", label: "Budget", icon: Wallet, el: <Budget /> },
   { id: "docs", label: "Docs", icon: BookOpen, el: <Docs /> },
+  { id: "vida", label: "VIDA", icon: BookMarked, el: <Vida /> },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -68,7 +70,7 @@ export default function Home() {
 
       {/* Mobile bottom nav */}
       <nav className="sm:hidden fixed bottom-0 inset-x-0 z-20 border-t bg-background/95 backdrop-blur">
-        <div className="grid grid-cols-5">
+        <div className="grid grid-cols-6">
           {TABS.map((t) => (
             <button
               key={t.id}
