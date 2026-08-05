@@ -1,5 +1,8 @@
 # C30 AWD Swap — Build Tracker
 
+> **For AI agents and maintainers: read [AGENTS.md](AGENTS.md) first** — architecture,
+> credentials, deploy procedures, and known gotchas are documented there.
+
 Mobile-friendly build tracker for the 2011 Volvo C30 AWD conversion (donor: 2005 S40 AWD M66).
 React + TypeScript + Vite + Tailwind + shadcn/ui. Phase checklists, parts/price tracker,
 budget roll-up, torque specs, verification list.
